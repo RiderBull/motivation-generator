@@ -1,13 +1,20 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { OpenRouter } from '@openrouter/sdk';
-// ElevenLabsClient removed
+import { ElevenLabsClient } from '@elevenlabs/elevenlabs-js';
 
-
-import { getJwtToken } from '@/lib/inworld';
+// import { v4 as uuidv4 } from 'uuid';
+// import fs from 'fs';
+// import path from 'path';
+// import { promisify } from 'util';
+// import { getJwtToken } from '@/lib/inworld';
 
 // Initialize Clients
 const openRouter = new OpenRouter({
     apiKey: process.env.OPENROUTER_API_KEY,
+});
+
+const elevenLabs = new ElevenLabsClient({
+    apiKey: process.env.ELEVENLABS_API_KEY
 });
 
 // Voice IDs
@@ -30,9 +37,9 @@ export async function POST(req: NextRequest) {
     try {
         const { name, context, persona, previousScripts } = await req.json();
 
-        // Check for Inworld keys instead of ElevenLabs
-        if (!process.env.OPENROUTER_API_KEY || !process.env.INWORLD_KEY || !process.env.INWORLD_SECRET) {
-            return NextResponse.json({ error: 'Missing API Keys (OpenRouter or Inworld)' }, { status: 500 });
+        // Check for Keys
+        if (!process.env.OPENROUTER_API_KEY || !process.env.ELEVENLABS_API_KEY) {
+            return NextResponse.json({ error: 'Missing API Keys' }, { status: 500 });
         }
 
         console.log('--- Start Generation Request ---');
@@ -47,16 +54,16 @@ export async function POST(req: NextRequest) {
         if (previousScripts && previousScripts.length > 0) {
             // Infinite Mode Prompt
             const historyText = previousScripts.join('\n\n');
-            prompt = `${systemInstruction}\n\nThis is a continuous speech. Here is what has been said so far:\n\n"${historyText}"\n\nContinue the speech for ${name} (max 300 words). You can delve into another subject that's likely to interest the user if you want. Keep outputting the speech only. The user context is: ${context}. Make it punchy and concise (max 300 words). include [Silence] or [Pause] markers when needed. Output one big paragraph, no breakline.`;
+            prompt = `${systemInstruction}\n\nThis is a continuous speech. Here is what has been said so far:\n\n"${historyText}"\n\nContinue the speech for ${name} (max 300 words). You can delve into another subject that's likely to interest the user if you want. Keep outputting the speech only. The user context is: ${context}. Make it punchy and concise (max 250 words). include [Silence] or [Pause] markers when needed. Output one big paragraph, no breakline.`;
         } else {
             // First Prompt
-            prompt = `${systemInstruction}\n\nWrite a motivational speech for ${name}. The user context is: ${context}. Use this context to personalize the speech. Make it punchy and concise (max 300 words). include [Silence] or [Pause] markers. Use rethorical techniques to make it super motivational. Just output the speech. Nothing more. Output one big paragraph, no breakline.`;
+            prompt = `${systemInstruction}\n\nWrite a motivational speech for ${name}. The user context is: ${context}. Use this context to personalize the speech. Make it punchy and concise (max 250 words). include [Silence] or [Pause] markers. Use rethorical techniques to make it super motivational. Just output the speech. Nothing more. Output one big paragraph, no breakline.`;
         }
 
         console.log('OpenRouter Prompt:', prompt);
 
         const completion = await openRouter.chat.send({
-            model: 'moonshotai/kimi-k2',
+            model: 'moonshotai/kimi-k2-thinking',
             messages: [
                 {
                     role: 'user',
@@ -78,6 +85,29 @@ export async function POST(req: NextRequest) {
         }
         console.log('Generated Script:', script);
 
+        // 2. Generate Voice with ElevenLabs
+        console.log('Generating Speech with ElevenLabs...');
+        const voiceId = VOICE_IDS[persona] || VOICE_IDS['Steve Jobs'];
+
+        const audioStream = await elevenLabs.textToSpeech.convert(voiceId, {
+            text: script,
+            model_id: "eleven_v3", // Turbo is faster for real-time
+            output_format: "mp3_44100_128",
+        });
+
+        // Convert stream to buffer
+        const chunks: Buffer[] = [];
+        for await (const chunk of audioStream) {
+            chunks.push(chunk);
+        }
+        const audioBuffer = Buffer.concat(chunks);
+
+        // Return Base64 Data URI directly
+        const base64Audio = audioBuffer.toString('base64');
+        const audioDataUri = `data:audio/mp3;base64,${base64Audio}`;
+
+        /* 
+        // --- INWORLD LEGACY CODE (PRESERVED) ---
         // 2. Generate Voice with Inworld
         // Use the single requested voice ID for now
         const INWORLD_VOICE_ID = 'default-u2j2nsstbrfdwwjkajopow__job2';
@@ -111,11 +141,12 @@ export async function POST(req: NextRequest) {
         if (!ttsData.audioContent) {
             throw new Error('No audio content received from Inworld API');
         }
-
+        
         // Return Base64 Data URI directly
         // This avoids writing to the filesystem which is read-only on Vercel
         const base64Audio = Buffer.from(ttsData.audioContent, 'base64').toString('base64');
         const audioDataUri = `data:audio/wav;base64,${base64Audio}`;
+        */
 
         return NextResponse.json({
             url: audioDataUri,

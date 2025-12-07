@@ -20,6 +20,36 @@ export default function Home() {
   const [showDetails, setShowDetails] = useState(false);
   const [persona, setPersona] = useState(PERSONAS[0].id);
 
+  // --- PERSISTENCE ---
+  const STORAGE_KEY = 'MOTIVATION_USER_STATE';
+
+  // Load state on mount
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(STORAGE_KEY);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (parsed.name) setName(parsed.name);
+        if (parsed.context) setContext(parsed.context);
+        if (parsed.additionalDetails) setAdditionalDetails(parsed.additionalDetails);
+        if (parsed.persona) setPersona(parsed.persona);
+      }
+    } catch (e) {
+      console.warn("Failed to load user state", e);
+    }
+  }, []);
+
+  // Save state on change
+  useEffect(() => {
+    try {
+      const stateToSave = { name, context, additionalDetails, persona };
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(stateToSave));
+    } catch (e) {
+      console.warn("Failed to save user state", e);
+    }
+  }, [name, context, additionalDetails, persona]);
+
+
   // --- AUDIO STATE MANAGEMENT ---
   const [isStreaming, setIsStreaming] = useState(false); // Is the session active?
   const [isPaused, setIsPaused] = useState(false);       // Did user explicitly pause?
@@ -36,16 +66,29 @@ export default function Home() {
 
   const audioRef = useRef<HTMLAudioElement>(null); // Voice only
 
+  const player1Ref = useRef<HTMLAudioElement>(null);
+  const player2Ref = useRef<HTMLAudioElement>(null);
+  const activePlayerIndexRef = useRef<0 | 1>(0); // 0 = Player1, 1 = Player2
+
   // --- QUEUE SOURCE OF TRUTH ---
   // We use Refs for logic to avoid React state closure staleness issues completely.
-  // State is used ONLY for UI rendering linkage.
   const audioQueueRef = useRef<string[]>([]);
   const scriptQueueRef = useRef<string[]>([]);
 
+  // Track which player has what
+  const nextTrackReadyRef = useRef(false); // Is the "other" player loaded and ready to go?
+
   // Helpers to keep Ref and State in sync
   const addToQueue = useCallback((audioUrl: string, scriptText: string) => {
-    audioQueueRef.current.push(audioUrl);
-    scriptQueueRef.current.push(scriptText);
+    // If the URL is relative, make it absolute immediately for consistency
+    const API_BASE = process.env.NEXT_PUBLIC_API_URL || '';
+    const fullAudioUrl = (audioUrl.startsWith('http') || audioUrl.startsWith('data:')) ? audioUrl : `${API_BASE}${audioUrl}`;
+
+    // Do we strip params for Data URIs? Yes.
+    const finalUrl = fullAudioUrl.startsWith('data:') ? fullAudioUrl : `${fullAudioUrl}?t=${Date.now()}`;
+
+    audioQueueRef.current.push(finalUrl);
+    scriptQueueRef.current.push(scriptText); // We can still queue scripts for history
 
     // Trigger UI update
     setAudioQueue([...audioQueueRef.current]);
@@ -67,11 +110,9 @@ export default function Home() {
   const isGeneratingRef = useRef(isGenerating);
   const isStreamingRef = useRef(isStreaming);
   const isPausedRef = useRef(isPaused);
-  const isSpeakingRef = useRef(isSpeaking);
+  const isSpeakingRef = useRef(isSpeaking); // "Speaking" now means AT LEAST ONE player is playing
 
   const fullHistoryRef = useRef<string[]>([]);
-
-  // Ref for Parameters (Name, Context, etc) to avoid stale closures in generation
   const paramsRef = useRef({ name, context, additionalDetails, persona });
 
   // Sync Refs with State
@@ -80,45 +121,32 @@ export default function Home() {
     isStreamingRef.current = isStreaming;
     isPausedRef.current = isPaused;
     isSpeakingRef.current = isSpeaking;
-
     fullHistoryRef.current = fullHistory;
     paramsRef.current = { name, context, additionalDetails, persona };
   }, [isGenerating, isStreaming, isPaused, isSpeaking, fullHistory, name, context, additionalDetails, persona]);
 
-  // Infinite Generation Loop (Moved Up)
+
+  // Infinite Generation Loop 
   const generateNextSegment = useCallback(async (history: string[]) => {
     if (isGeneratingRef.current) return;
-
     setIsGenerating(true);
     setError(null);
 
     try {
-      // Read latest params from Ref
       const { name, context, additionalDetails, persona } = paramsRef.current;
-
-      const fullContext = additionalDetails
-        ? `${context}. Additional context about me: ${additionalDetails}`
-        : context;
+      const fullContext = additionalDetails ? `${context}. Additional context: ${additionalDetails}` : context;
+      const API_BASE = process.env.NEXT_PUBLIC_API_URL || '';
 
       const res = await fetch(`${API_BASE}/api/generate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name,
-          context: fullContext,
-          persona,
-          // mood removed
-          previousScripts: history
-        }),
+        body: JSON.stringify({ name, context: fullContext, persona, previousScripts: history }),
       });
 
       const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.error || 'Failed to generate next segment');
-      }
+      if (!res.ok) throw new Error(data.error || 'Failed to generate');
 
       if (data.url) {
-        // Use Helper to add
         addToQueue(data.url, data.script);
         console.log("Segment added. Queue size:", audioQueueRef.current.length);
       }
@@ -128,90 +156,143 @@ export default function Home() {
     } finally {
       setIsGenerating(false);
     }
-  }, [addToQueue]); // addToQueue is stable
+  }, [addToQueue]);
 
-  // Robust PlayNext Function
-  const playNext = useCallback(async () => {
-    // 1. Check Availability (Directly from Ref)
-    if (!isStreamingRef.current) {
-      console.log("playNext abort: Not streaming");
-      return;
-    }
-    if (isPausedRef.current) {
-      console.log("playNext abort: Paused");
-      return;
-    }
-    if (audioQueueRef.current.length === 0) {
-      console.log("playNext abort: Queue empty.");
-      return;
-    }
-    // Prevent double play if already speaking
-    if (isSpeakingRef.current) {
-      console.log("playNext abort: Already speaking");
-      return;
-    }
 
-    // 2. Shift Item
+  // --- GAPLESS AUDIO ENGINE ---
+
+  // Preloads the next item into the INACTIVE player
+  const preloadNextTrack = useCallback(() => {
+    // 1. Check if we have stuff in queue
+    if (audioQueueRef.current.length === 0) return;
+
+    // 2. Identify Inactive Player
+    const activeIndex = activePlayerIndexRef.current;
+    const inactiveIndex = activeIndex === 0 ? 1 : 0;
+    const targetPlayer = inactiveIndex === 0 ? player1Ref.current : player2Ref.current;
+
+    if (!targetPlayer) return;
+    if (nextTrackReadyRef.current) return; // Already has something loaded?
+
+    // 3. Pop from queue
     const { nextAudio, nextScript } = shiftQueue();
-    if (!nextAudio || !nextScript) return;
+    if (!nextAudio) return;
 
-    console.log("playNext initiating for:", nextAudio);
-    setCurrentScript(nextScript);
+    console.log(`Preloading into Player ${inactiveIndex + 1}:`, nextAudio.substring(0, 30));
 
-    // 3. Prepare Audio
-    if (!audioRef.current) return;
+    // 4. Load it
+    targetPlayer.src = nextAudio;
+    targetPlayer.load();
 
-    const audioSrc = (nextAudio.startsWith('http') || nextAudio.startsWith('data:')) ? nextAudio : `${API_BASE}${nextAudio}`;
+    // We assume it's ready once we set it (or we can listen to canplay)
+    // For simplicity with Data URIs, it's usually instant.
+    nextTrackReadyRef.current = true;
 
-    // Do not append query params to Data URIs (corrupts base64)
-    if (audioSrc.startsWith('data:')) {
-      audioRef.current.src = audioSrc;
-    } else {
-      audioRef.current.src = `${audioSrc}?t=${Date.now()}`;
-    }
-
-    audioRef.current.currentTime = 0;
-    audioRef.current.load();
-
-    // 4. Set State & Play
-    setIsSpeaking(true);
-
-    try {
-      console.log("Attempting to play audio (src length):", audioRef.current.src.length);
-      const playPromise = audioRef.current.play();
-      if (playPromise !== undefined) {
-        await playPromise;
-        console.log("Audio playback started successfully");
-      }
-
-      // 5. Manage Buffer & History
+    // Note: We don't verify 'canplay' here for speed, but ideally we would.
+    if (nextScript) {
+      // We might want to store this script to show it when it ACTUALLY plays
+      // For now, we update history immediately for generation context
       setFullHistory(prev => {
         const newHistory = [...prev, nextScript];
-
-        // Check Buffer directly from Ref
         const bufferSize = audioQueueRef.current.length;
-        const generating = isGeneratingRef.current;
-        console.log("Buffer check:", { bufferSize, generating });
-
-        if (bufferSize <= 2 && !generating) {
-          console.log("Triggering generation (buffer low)");
+        // Trigger generation if buffer low (checking both queue AND the preloaded one)
+        // If we just popped one, queue is smaller.
+        if (bufferSize <= 2 && !isGeneratingRef.current) {
           generateNextSegment(newHistory);
         }
         return newHistory;
       });
-
-    } catch (e: any) {
-      console.error("Playback failed for:", nextAudio, e);
-      setError(`Playback failed: ${e.message}`);
-      setIsSpeaking(false); // Reset tracking on failure so we can try next
+      setCurrentScript(nextScript); // This updates UI “Too Early” (during preload), but acceptable for "Next Up" feel
     }
+
   }, [shiftQueue, generateNextSegment]);
+
+
+  // This is called when the ACTIVE player finishes
+  const handleTrackEnded = useCallback(async () => {
+    console.log("Track Ended. Switching players...");
+
+    const activeIndex = activePlayerIndexRef.current;
+    const inactiveIndex = activeIndex === 0 ? 1 : 0;
+
+    const activePlayer = activeIndex === 0 ? player1Ref.current : player2Ref.current;
+    const nextPlayer = inactiveIndex === 0 ? player1Ref.current : player2Ref.current;
+
+    // 1. Swap Indices
+    activePlayerIndexRef.current = inactiveIndex as 0 | 1;
+
+    // 2. Play the Next One (if ready)
+    if (nextPlayer && nextTrackReadyRef.current) {
+      console.log(`Starting Player ${inactiveIndex + 1} IMMEDIATELY`);
+      nextPlayer.play().catch(e => console.error("Playback failed switch", e));
+      nextTrackReadyRef.current = false; // It's now consumed
+
+      // 3. Preload the NEXT NEXT one into the old active player
+      preloadNextTrack();
+    } else {
+      console.log("Next track wasn't ready! Stalling...");
+      setIsSpeaking(false);
+      // If queue has items, try to preload and play manually?
+      // The queue watcher effect should kick in.
+      nextTrackReadyRef.current = false;
+      preloadNextTrack(); // Try to load something
+      // If we load something now, we need to auto-play it when ready.
+      // For now, we rely on the Watcher to see "Oh, not speaking, but queue has items"
+    }
+  }, [preloadNextTrack]);
+
+
+  // Initial Start / Resume
+  const playNext = useCallback(async () => {
+    // This is acting as "Kickstart" now.
+    if (!isStreamingRef.current || isPausedRef.current) return;
+    if (isSpeakingRef.current) return; // Already going
+
+    // Identify current player
+    const activeIndex = activePlayerIndexRef.current;
+    const activePlayer = activeIndex === 0 ? player1Ref.current : player2Ref.current;
+
+    if (!activePlayer) return;
+
+    // Case A: Next track IS ready in Current (Wait, if it was ready, why isn't it playing?)
+    // Actually, nextTrackReadyRef refers to the *inactive* player.
+
+    // Case B: Nothing playing. Check if we need to load active player from queue?
+    // If we are fully stopped, reload active player.
+    if (audioQueueRef.current.length > 0) {
+      const { nextAudio, nextScript } = shiftQueue();
+      if (nextAudio) {
+        console.log("Kickstarting Player", activeIndex + 1);
+        activePlayer.src = nextAudio;
+        activePlayer.load();
+        setIsSpeaking(true);
+        await activePlayer.play();
+
+        if (nextScript) {
+          setFullHistory(prev => {
+            const newHistory = [...prev, nextScript];
+            if (audioQueueRef.current.length <= 2 && !isGeneratingRef.current) {
+              generateNextSegment(newHistory);
+            }
+            return newHistory;
+          });
+          setCurrentScript(nextScript);
+        }
+
+        // Immediately preload next into the OTHER player
+        preloadNextTrack();
+      }
+    }
+  }, [shiftQueue, generateNextSegment, preloadNextTrack]);
+
 
   // Stop Stream
   const stopStream = () => {
     setIsStreaming(false);
     setIsPaused(false);
     setIsSpeaking(false);
+    activePlayerIndexRef.current = 0;
+    nextTrackReadyRef.current = false;
 
     audioQueueRef.current = [];
     scriptQueueRef.current = [];
@@ -220,74 +301,51 @@ export default function Home() {
     setFullHistory([]);
     setCurrentScript(null);
     setError(null);
-    if (audioRef.current) {
-      audioRef.current.pause();
-      audioRef.current.currentTime = 0;
-      audioRef.current.src = '';
-    }
+
+    if (player1Ref.current) { player1Ref.current.pause(); player1Ref.current.currentTime = 0; player1Ref.current.src = ''; }
+    if (player2Ref.current) { player2Ref.current.pause(); player2Ref.current.currentTime = 0; player2Ref.current.src = ''; }
   };
 
 
-  // Refined "Start"
   const handleStart = async () => {
-    if (!name || !context) {
-      setError('Please tell me who you are and what you need.');
-      return;
-    }
+    if (!name || !context) { setError('Please tell me who you are and what you need.'); return; }
     setError(null);
-
-    // Set States
     setIsStreaming(true);
     setIsPaused(false);
     setIsSpeaking(false);
-
-    await generateNextSegment([]); // Generate the first segment
+    await generateNextSegment([]);
   };
 
-  // Toggle Play/Pause
   const togglePause = () => {
+    const activePlayer = activePlayerIndexRef.current === 0 ? player1Ref.current : player2Ref.current;
     if (isPaused) {
       // RESUME
       setIsPaused(false);
-
-      // Resume Speech if we have one loaded, PlayNext if queue has stuff
-      if (audioRef.current && audioRef.current.src && audioRef.current.src !== '') {
-        audioRef.current.play().catch(e => console.error("Resume audio failed", e));
+      if (activePlayer && activePlayer.src) {
+        activePlayer.play();
         setIsSpeaking(true);
       } else {
-        // Try to trigger next if nothing was playing
         playNext();
       }
     } else {
       // PAUSE
       setIsPaused(true);
-      audioRef.current?.pause();
-      setIsSpeaking(false); // Technically paused speaking
+      if (activePlayer) activePlayer.pause();
+      setIsSpeaking(false);
     }
   };
 
-  // Centralized Playback Controller / Queue Watcher
-  // Triggers when queue gets items or when we finish speaking (if streaming and not paused)
+  // Watcher
   useEffect(() => {
     if (!isStreaming) return;
     if (isPaused) return;
-    if (isSpeaking) return; // Wait until done speaking
 
-    // Check ref directly
-    const hasItems = audioQueueRef.current.length > 0;
-
-    if (hasItems) {
-      console.log("Watcher triggering playNext. Queue:", audioQueueRef.current.length);
+    // If not speaking, try to kickstart
+    if (!isSpeaking) {
       playNext();
     }
   }, [audioQueue, isStreaming, isPaused, isSpeaking, playNext]);
 
-  // Handle voice audio ending
-  const handleVoiceEnded = useCallback(() => {
-    console.log("Voice ended.");
-    setIsSpeaking(false);
-    // The effect above [isSpeaking changing to false] will pick this up and call playNext if queue has items
-  }, []);
 
   const selectedPersona = PERSONAS.find(p => p.id === persona);
 
@@ -460,7 +518,7 @@ export default function Home() {
                   {persona} Live Stream
                 </h3>
                 <p className="text-[10px] font-sans uppercase tracking-[0.15em] text-stone-400 animate-pulse">
-                  {isPaused ? "Paused" : isGenerating ? "Generating next segment..." : "Streaming"}
+                  {isPaused ? "Paused" : isQuestion(currentScript) ? "Asking Question..." : isGenerating ? "Generating next segment..." : "Streaming"}
                 </p>
               </div>
 
@@ -474,18 +532,23 @@ export default function Home() {
                 </button>
               </div>
 
-              {/* Hidden Players - Audio Only */}
+              {/* Hidden Players - Audio Only - DUAL BUFFER */}
               <audio
-                ref={audioRef}
-                onEnded={handleVoiceEnded}
+                ref={player1Ref}
+                onEnded={handleTrackEnded}
                 onError={(e) => {
-                  const target = e.target as HTMLAudioElement;
-                  console.error("Audio Element Error:", target.error);
-                  setError(`Audio Playback Error: Code ${target.error?.code} - ${target.error?.message || "Unknown"}`);
-                  setIsSpeaking(false);
+                  console.error("Player 1 Error:", e.currentTarget.error);
+                  handleTrackEnded(); // Try skip
                 }}
-                onPlay={() => console.log("Audio Element: Playing")}
-                onPause={() => console.log("Audio Element: Paused")}
+                className="hidden"
+              />
+              <audio
+                ref={player2Ref}
+                onEnded={handleTrackEnded}
+                onError={(e) => {
+                  console.error("Player 2 Error:", e.currentTarget.error);
+                  handleTrackEnded(); // Try skip
+                }}
                 className="hidden"
               />
             </div>
@@ -495,4 +558,10 @@ export default function Home() {
       </div>
     </main>
   );
+}
+
+// Quick helper
+function isQuestion(s: string | null) {
+  if (!s) return false;
+  return s.trim().endsWith('?');
 }
