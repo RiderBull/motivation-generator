@@ -1,11 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { OpenRouter } from '@openrouter/sdk';
-import { ElevenLabsClient } from '@elevenlabs/elevenlabs-js';
+// ElevenLabsClient removed
 import ffmpeg from 'fluent-ffmpeg';
 import { v4 as uuidv4 } from 'uuid';
 import fs from 'fs';
 import path from 'path';
 import { promisify } from 'util';
+import { getJwtToken } from '@/lib/inworld';
 
 // Initialize Clients
 const openRouter = new OpenRouter({
@@ -30,15 +31,32 @@ const PERSONA_PROMPTS: Record<string, string> = {
 
 export async function POST(req: NextRequest) {
     try {
-        const { name, context, persona, mood } = await req.json();
+        const { name, context, persona, previousScripts } = await req.json();
 
-        if (!process.env.OPENROUTER_API_KEY || !process.env.NEXT_PUBLIC_ELEVENLABS_API_KEY) {
-            return NextResponse.json({ error: 'Missing API Keys' }, { status: 500 });
+        // Check for Inworld keys instead of ElevenLabs
+        if (!process.env.OPENROUTER_API_KEY || !process.env.INWORLD_KEY || !process.env.INWORLD_SECRET) {
+            return NextResponse.json({ error: 'Missing API Keys (OpenRouter or Inworld)' }, { status: 500 });
         }
 
+        console.log('--- Start Generation Request ---');
+        console.log('Request parameters:', { name, context, persona, hasHistory: !!previousScripts });
+
         // 1. Generate Script with OpenRouter
+        console.log('Using persona:', persona);
         const systemInstruction = PERSONA_PROMPTS[persona] || PERSONA_PROMPTS['Steve Jobs'];
-        const prompt = `${systemInstruction}\n\nWrite a short motivational speech (max 100 words) for ${name}. They are struggling with or working on: ${context}. Make it punchy. Do not include any [Silence] or [Pause] markers, just text.`;
+
+        // Construct Prompt based on history
+        let prompt = '';
+        if (previousScripts && previousScripts.length > 0) {
+            // Infinite Mode Prompt
+            const historyText = previousScripts.join('\n\n');
+            prompt = `${systemInstruction}\n\nThis is a continuous speech. Here is what has been said so far:\n\n"${historyText}"\n\nContinue the speech for ${name} (max 300 words). You can delve into another subject that's likely to interest the user if you want. Keep outputting the speech only. The user context is: ${context}. Make it punchy and concise (max 300 words). include [Silence] or [Pause] markers when needed. Output one big paragraph, no breakline.`;
+        } else {
+            // First Prompt
+            prompt = `${systemInstruction}\n\nWrite a motivational speech for ${name}. The user context is: ${context}. Use this context to personalize the speech. Make it punchy and concise (max 300 words). include [Silence] or [Pause] markers. Use rethorical techniques to make it super motivational. Just output the speech. Nothing more. Output one big paragraph, no breakline.`;
+        }
+
+        console.log('OpenRouter Prompt:', prompt);
 
         const completion = await openRouter.chat.send({
             model: 'moonshotai/kimi-k2-thinking',
@@ -56,10 +74,6 @@ export async function POST(req: NextRequest) {
         if (typeof msgContent === 'string') {
             script = msgContent;
         } else if (Array.isArray(msgContent)) {
-            // Handle array content if necessary, though for text generation it's usually string for these models
-            // For simplicity, just join or take first text part. 
-            // Actually, the SDK types might suggest it is distinct objects.
-            // We'll trust string for now or fallback.
             const textPart = msgContent.find(c => c.type === 'text');
             if (textPart && 'text' in textPart) {
                 script = textPart.text;
@@ -67,70 +81,60 @@ export async function POST(req: NextRequest) {
         }
         console.log('Generated Script:', script);
 
-        // 2. Generate Voice with ElevenLabs
-        const elevenLabs = new ElevenLabsClient({ apiKey: process.env.NEXT_PUBLIC_ELEVENLABS_API_KEY });
-        const voiceId = VOICE_IDS[persona] || VOICE_IDS['Steve Jobs'];
-        const audioStream = await elevenLabs.textToDialogue.convert({
-            inputs: [{
-                text: script,
-                voiceId: voiceId,
-            }],
-            modelId: 'eleven_multilingual_v2',
+        // 2. Generate Voice with Inworld
+        // Use the single requested voice ID for now
+        const INWORLD_VOICE_ID = 'default-u2j2nsstbrfdwwjkajopow__job2';
+
+        console.log('Getting Inworld Token...');
+        const tokenData = await getJwtToken();
+
+        console.log('Generating Speech with Inworld...');
+        const ttsResponse = await fetch('https://api.inworld.ai/tts/v1/voice', {
+            method: 'POST',
+            headers: {
+                'Authorization': `${tokenData.type} ${tokenData.token}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                text: `[SLOWLY, DRAMATIC, LONG PAUSES] ${script}`,
+                voiceId: INWORLD_VOICE_ID,
+                modelId: 'inworld-tts-1-max',
+                timestampType: 'WORD'
+            })
         });
+
+        if (!ttsResponse.ok) {
+            const errorText = await ttsResponse.text();
+            throw new Error(`Inworld TTS API Error: ${ttsResponse.status} ${ttsResponse.statusText} - ${errorText}`);
+        }
+
+        const ttsData = await ttsResponse.json();
+
+        if (!ttsData.audioContent) {
+            throw new Error('No audio content received from Inworld API');
+        }
 
         // Save temporary voice file
         const tempId = uuidv4();
         const tempDir = path.join(process.cwd(), 'public', 'output', 'temp');
         if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
 
-        const voicePath = path.join(tempDir, `${tempId}_voice.mp3`);
-        const fileStream = fs.createWriteStream(voicePath);
+        // Inworld voice extraction (no ffmpeg mix)
+        const voicePath = path.join(tempDir, `${tempId}_voice.wav`);
+        const audioBuffer = Buffer.from(ttsData.audioContent, 'base64');
+        fs.writeFileSync(voicePath, audioBuffer);
 
-        for await (const chunk of audioStream) {
-            fileStream.write(chunk);
-        }
-        fileStream.end();
-
-        await new Promise<void>((resolve) => fileStream.on('finish', () => resolve()));
-
-        // 3. Pick Music
-        // Map 'Motivational' -> 'focus' folder, 'Emotional' -> 'emotional' folder
-        const moodFolder = mood === 'Motivational' ? 'focus' : 'emotional';
-        const musicDir = path.join(process.cwd(), 'playlists', moodFolder);
-        let musicFile = '';
-
-        if (fs.existsSync(musicDir)) {
-            const files = fs.readdirSync(musicDir).filter(f => f.endsWith('.mp3'));
-            if (files.length > 0) {
-                musicFile = path.join(musicDir, files[Math.floor(Math.random() * files.length)]);
-            }
-        }
-
-        // 4. Mix Audio
-        const outputPath = path.join(process.cwd(), 'public', 'output', `${tempId}_final.mp3`);
-
-        if (musicFile) {
-            await new Promise<void>((resolve, reject) => {
-                ffmpeg()
-                    .input(musicFile)
-                    .inputOption('-stream_loop -1') // Loop music
-                    .input(voicePath)
-                    .complexFilter('[0:a][1:a]amix=inputs=2:duration=shortest[out]')
-                    .map('[out]')
-                    .on('end', () => resolve())
-                    .on('error', (err) => reject(err))
-                    .save(outputPath);
-            });
-        } else {
-            // If no music, just copy voice to output
-            fs.copyFileSync(voicePath, outputPath);
-        }
-
-        // Cleanup temp voice
-        // fs.unlinkSync(voicePath); // Keep for debugging if needed, or delete
+        // Return pure voice file
+        // We can rename it to .mp3 if we want to lie to the browser or just serve as .wav. 
+        // Wav is fine for <audio>.
+        // Let's copy it to a accessible public path
+        const publicFileName = `${tempId}_voice.wav`;
+        const publicPath = path.join(process.cwd(), 'public', 'output', publicFileName);
+        fs.copyFileSync(voicePath, publicPath);
+        fs.unlinkSync(voicePath);
 
         return NextResponse.json({
-            url: `/output/${tempId}_final.mp3`,
+            url: `/output/${publicFileName}`,
             script: script
         });
 
