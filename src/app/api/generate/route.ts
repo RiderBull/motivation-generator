@@ -56,7 +56,7 @@ export async function POST(req: NextRequest) {
         console.log('OpenRouter Prompt:', prompt);
 
         const completion = await openRouter.chat.send({
-            model: 'moonshotai/kimi-k2-thinking',
+            model: 'moonshotai/kimi-k2',
             messages: [
                 {
                     role: 'user',
@@ -96,7 +96,8 @@ export async function POST(req: NextRequest) {
                 text: `[SLOWLY, DRAMATIC, LONG PAUSES] ${script}`,
                 voiceId: INWORLD_VOICE_ID,
                 modelId: 'inworld-tts-1-max',
-                timestampType: 'WORD'
+                timestampType: 'WORD',
+                temperature: 0.7
             })
         });
 
