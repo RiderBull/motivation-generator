@@ -161,7 +161,7 @@ export default function Home() {
     // 3. Prepare Audio
     if (!audioRef.current) return;
 
-    const audioSrc = nextAudio.startsWith('http') ? nextAudio : `${API_BASE}${nextAudio}`;
+    const audioSrc = (nextAudio.startsWith('http') || nextAudio.startsWith('data:')) ? nextAudio : `${API_BASE}${nextAudio}`;
     audioRef.current.src = `${audioSrc}?t=${Date.now()}`;
     audioRef.current.currentTime = 0;
     audioRef.current.load();

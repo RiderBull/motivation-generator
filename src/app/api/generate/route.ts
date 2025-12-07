@@ -2,10 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { OpenRouter } from '@openrouter/sdk';
 // ElevenLabsClient removed
 
-import { v4 as uuidv4 } from 'uuid';
-import fs from 'fs';
-import path from 'path';
-import { promisify } from 'util';
+
 import { getJwtToken } from '@/lib/inworld';
 
 // Initialize Clients
@@ -114,27 +111,13 @@ export async function POST(req: NextRequest) {
             throw new Error('No audio content received from Inworld API');
         }
 
-        // Save temporary voice file
-        const tempId = uuidv4();
-        const tempDir = path.join(process.cwd(), 'public', 'output', 'temp');
-        if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
-
-        // Inworld voice extraction (no ffmpeg mix)
-        const voicePath = path.join(tempDir, `${tempId}_voice.wav`);
-        const audioBuffer = Buffer.from(ttsData.audioContent, 'base64');
-        fs.writeFileSync(voicePath, audioBuffer);
-
-        // Return pure voice file
-        // We can rename it to .mp3 if we want to lie to the browser or just serve as .wav. 
-        // Wav is fine for <audio>.
-        // Let's copy it to a accessible public path
-        const publicFileName = `${tempId}_voice.wav`;
-        const publicPath = path.join(process.cwd(), 'public', 'output', publicFileName);
-        fs.copyFileSync(voicePath, publicPath);
-        fs.unlinkSync(voicePath);
+        // Return Base64 Data URI directly
+        // This avoids writing to the filesystem which is read-only on Vercel
+        const base64Audio = Buffer.from(ttsData.audioContent, 'base64').toString('base64');
+        const audioDataUri = `data:audio/wav;base64,${base64Audio}`;
 
         return NextResponse.json({
-            url: `/output/${publicFileName}`,
+            url: audioDataUri,
             script: script
         });
 
