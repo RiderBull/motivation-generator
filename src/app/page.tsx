@@ -162,7 +162,14 @@ export default function Home() {
     if (!audioRef.current) return;
 
     const audioSrc = (nextAudio.startsWith('http') || nextAudio.startsWith('data:')) ? nextAudio : `${API_BASE}${nextAudio}`;
-    audioRef.current.src = `${audioSrc}?t=${Date.now()}`;
+
+    // Do not append query params to Data URIs (corrupts base64)
+    if (audioSrc.startsWith('data:')) {
+      audioRef.current.src = audioSrc;
+    } else {
+      audioRef.current.src = `${audioSrc}?t=${Date.now()}`;
+    }
+
     audioRef.current.currentTime = 0;
     audioRef.current.load();
 
@@ -170,11 +177,11 @@ export default function Home() {
     setIsSpeaking(true);
 
     try {
-      console.log("Attempting to play audio:", audioRef.current.src);
+      console.log("Attempting to play audio (src length):", audioRef.current.src.length);
       const playPromise = audioRef.current.play();
       if (playPromise !== undefined) {
         await playPromise;
-        console.log("Audio playback started successfully for:", nextAudio);
+        console.log("Audio playback started successfully");
       }
 
       // 5. Manage Buffer & History
@@ -473,8 +480,8 @@ export default function Home() {
                 onEnded={handleVoiceEnded}
                 onError={(e) => {
                   const target = e.target as HTMLAudioElement;
-                  console.error("Audio Element Error:", target.error, "Src:", target.src);
-                  setError(`Audio Playback Error: ${target.error?.message || "Unknown"}`);
+                  console.error("Audio Element Error:", target.error);
+                  setError(`Audio Playback Error: Code ${target.error?.code} - ${target.error?.message || "Unknown"}`);
                   setIsSpeaking(false);
                 }}
                 onPlay={() => console.log("Audio Element: Playing")}

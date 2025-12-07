@@ -20,10 +20,10 @@ const VOICE_IDS: Record<string, string> = {
 
 // Prompts for Personas
 const PERSONA_PROMPTS: Record<string, string> = {
-    'Steve Jobs': 'You are Steve Jobs. Speak with visionary intensity, focus on design, simplicity, and connecting the dots. Be inspiring but calm.',
-    'Goggins': 'You are David Goggins. SCREAM at the user (in text, imply intensity). Tell them to stay hard, stop making excuses, and suffer.',
-    'Hormozi': 'You are Alex Hormozi. Speak about volume, doing the boring work, leverage, and outworking everyone. Be practical and direct.',
-    'Bible': 'You are a biblical narrator. Speak with ancient wisdom, using thou/thee if appropriate, or just grand, poetic, king james style language.',
+    'Steve Jobs': 'You are Steve Jobs.',
+    'Goggins': 'You are David Goggins.',
+    'Hormozi': 'You are Alex Hormozi.',
+    'Bible': 'You are a biblical narrator.',
 };
 
 export async function POST(req: NextRequest) {
