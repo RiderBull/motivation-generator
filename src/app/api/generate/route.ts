@@ -91,8 +91,7 @@ export async function POST(req: NextRequest) {
 
         const audioStream = await elevenLabs.textToSpeech.convert(voiceId, {
             text: script,
-            model_id: "eleven_v3", // Turbo is faster for real-time
-            output_format: "mp3_44100_128",
+            modelId: "eleven_v3"
         });
 
         // Convert stream to buffer
