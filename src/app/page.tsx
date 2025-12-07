@@ -232,12 +232,12 @@ export default function Home() {
     } else {
       console.log("Next track wasn't ready! Stalling...");
       setIsSpeaking(false);
-      // If queue has items, try to preload and play manually?
-      // The queue watcher effect should kick in.
       nextTrackReadyRef.current = false;
-      preloadNextTrack(); // Try to load something
-      // If we load something now, we need to auto-play it when ready.
-      // For now, we rely on the Watcher to see "Oh, not speaking, but queue has items"
+
+      // Attempt immediate recovery (Watcher will also catch this, but this is faster)
+      // We don't call playNext() directly because of Ref staleness, but we let the watcher handle it.
+      // However, trigger a preload attempt immediately just in case queue has items but nothing was loaded.
+      preloadNextTrack();
     }
   }, [preloadNextTrack]);
 
@@ -335,7 +335,7 @@ export default function Home() {
     }
   };
 
-  // Watcher
+  // Watcher: KICKSTART
   useEffect(() => {
     if (!isStreaming) return;
     if (isPaused) return;
@@ -345,6 +345,16 @@ export default function Home() {
       playNext();
     }
   }, [audioQueue, isStreaming, isPaused, isSpeaking, playNext]);
+
+  // Watcher: PRELOADER (The Fix)
+  // This ensures that as soon as the queue gets a new item, we try to preload it.
+  useEffect(() => {
+    if (!isStreaming) return;
+    // We try to preload regardless of playing state. 
+    // If playing, it preloads into inactive. 
+    // If not playing, playNext() handles it, but this doesn't hurt (idempotent).
+    preloadNextTrack();
+  }, [audioQueue, isStreaming, preloadNextTrack]);
 
 
   const selectedPersona = PERSONAS.find(p => p.id === persona);
