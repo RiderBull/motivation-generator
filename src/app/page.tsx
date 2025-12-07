@@ -13,6 +13,7 @@ const PERSONAS = [
 ];
 
 export default function Home() {
+  const API_BASE = process.env.NEXT_PUBLIC_API_URL || '';
   const [name, setName] = useState('');
   const [context, setContext] = useState('');
   const [additionalDetails, setAdditionalDetails] = useState('');
@@ -99,7 +100,7 @@ export default function Home() {
         ? `${context}. Additional context about me: ${additionalDetails}`
         : context;
 
-      const res = await fetch('/api/generate', {
+      const res = await fetch(`${API_BASE}/api/generate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -160,7 +161,8 @@ export default function Home() {
     // 3. Prepare Audio
     if (!audioRef.current) return;
 
-    audioRef.current.src = `${nextAudio}?t=${Date.now()}`;
+    const audioSrc = nextAudio.startsWith('http') ? nextAudio : `${API_BASE}${nextAudio}`;
+    audioRef.current.src = `${audioSrc}?t=${Date.now()}`;
     audioRef.current.currentTime = 0;
     audioRef.current.load();
 

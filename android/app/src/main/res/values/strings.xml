@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Motivation Generator</string>
+    <string name="title_activity_main">Motivation Generator</string>
+    <string name="package_name">com.motivation.generator</string>
+    <string name="custom_url_scheme">com.motivation.generator</string>
+</resources>

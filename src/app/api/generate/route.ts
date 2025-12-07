@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { OpenRouter } from '@openrouter/sdk';
 // ElevenLabsClient removed
-import ffmpeg from 'fluent-ffmpeg';
+
 import { v4 as uuidv4 } from 'uuid';
 import fs from 'fs';
 import path from 'path';
