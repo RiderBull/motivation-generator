@@ -19,7 +19,7 @@ const elevenLabs = new ElevenLabsClient({
 
 // Voice IDs
 const VOICE_IDS: Record<string, string> = {
-    'Steve Jobs': 'w6XKEBjwKfG3SYJoGmil', // "Job"
+    'Steve Jobs': 'RfMZHcb3sS4bkwelpiwN', // "Job"
     // 'Goggins': 'TxGEqnHWrfWFTfGW9XjX', // Unavailable
     'Hormozi': '3DgF8Es1OnVy0iNlx4ap',
     'Bible': 'fCxG8OHm4STbIsWe4aT9',
